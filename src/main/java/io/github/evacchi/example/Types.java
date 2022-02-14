@@ -15,6 +15,7 @@ import java.util.stream.Stream;
 import static java.util.Map.entry;
 import static java.util.stream.Collectors.joining;
 import static io.github.evacchi.example.Type.*;
+import static io.github.evacchi.example.Term.*;
 
 
 sealed interface Term {
@@ -36,14 +37,14 @@ sealed interface Term {
 
 sealed interface Type {
     final class TypeVariable implements Type {
-        private static char next = 'a';
+        private static int next = 0;
         String v; TypeVariable(String v) { this.v =v ; }
         public String toString() { return v; }
         public boolean equals(Object o) { return o instanceof TypeVariable tv && Objects.equals(v, tv.v); }
         public int hashCode() { return Objects.hash(v); }
     }
     static TypeVariable TypeVariable(String v) {return new TypeVariable(v);}
-    static TypeVariable TypeVariable() { return new TypeVariable(String.valueOf(TypeVariable.next++)); }
+    static TypeVariable TypeVariable() { return new TypeVariable("a" + TypeVariable.next++); }
 
     record Arrow(Type t1, Type t2) implements Type { public String toString() { return String.format("(%s->%s)", t1, t2); }}
     static Arrow Arrow(Type t1, Type t2) {return new Arrow(t1,t2);}
@@ -70,7 +71,7 @@ sealed interface Type {
             return new Subst() {
                 @Override
                 Type lookup(TypeVariable y) {
-                    return (x.equals(y))? t : lookup(y);
+                    return (x.equals(y))? t : Subst.this.lookup(y);
                 }
             };
         }
@@ -117,15 +118,52 @@ sealed interface Type {
 
         Type typeOf(Term e) {
             var a = TypeVariable();
-            return tp(this, e, a, Subst.Empty).apply(a);
+            return tp(e, a, Subst.Empty).apply(a);
         }
 
+        Term current ;
+
+        Subst tp(Term e, Type t, Subst s) {
+            current = e;
+            return switch (e) {
+                case Var v -> {
+                    var u = this.lookup(v.name());
+                    if (u == null) throw new RuntimeException("undefined: " + v.name());
+                    else yield mgu(u.newInstance(), t, s);
+                }
+                case Lambda l -> {
+                    var a = TypeVariable();
+                    var b = TypeVariable();
+                    var s1 = mgu(t, Arrow(a, b), s);
+                    var env1 = this.append(l.v(), TypeScheme(List.of(), a));
+                    yield env1.tp(l.body(), b, s1);
+                }
+                case Apply app -> {
+                    var a = TypeVariable();
+                    var s1 = this.tp(app.fn(), Arrow(a, t), s);
+                    yield this.tp(app.arg(), a, s1);
+                }
+                case Let l -> {
+                    var a = TypeVariable();
+                    var s1 = this.tp(l.defn(), Arrow(a, t), s);
+                    yield this.append(l.v(), this.apply(s1).gen(s1.apply(a))).tp(l.body(), t, s1);
+                }
+                case LetRec l -> {
+                    var a = TypeVariable();
+                    var b = TypeVariable();
+                    var s1 = this.append(l.v(), TypeScheme(List.of(), a)).tp(l.defn(), b, s);
+                    var s2 = mgu(a, b, s1);
+                    Env ee = this.append(l.v(), this.apply(s2).gen(s2.apply(a)));
+                    yield ee.tp(l.body(), t, s2);
+                }
+            };
+        }
     }
 
     static List<TypeVariable> tyVars(Type t) {
         return switch (t) {
-            case TypeVariable tv -> List.of(tv);
-            case Arrow a -> Stream.concat(tyVars(a.t1()).stream(), tyVars(a.t2()).stream()).toList();
+            case TypeVariable tv -> new ArrayList<>(List.of(tv));
+            case Arrow a -> Stream.concat(tyVars(a.t1()).stream(), tyVars(a.t2()).stream()).collect(Collectors.toList());
             case TypeCons tc -> tc.types().stream().flatMap(tp -> tyVars(tp).stream()).collect(Collectors.toList());
         };
     }
@@ -157,7 +195,7 @@ sealed interface Type {
             return mgu(u, t, s);
         }
         if (st instanceof Arrow a && su instanceof Arrow b) {
-            mgu(a.t1(), b.t1(), mgu(a.t2(), b.t2(), s));
+            return mgu(a.t1(), b.t1(), mgu(a.t2(), b.t2(), s));
         }
         if (st instanceof TypeCons a && su instanceof TypeCons b && a.name().equals(b.name())) {
             for (int i = 0; i < a.types().size(); i++) {
@@ -166,42 +204,6 @@ sealed interface Type {
             return s;
         }
         throw new RuntimeException("cannot unify " + st + " with " + su);
-    }
-
-    static Subst tp(Env env, Term e, Type t, Subst s) {
-        var current = e;
-        return switch (e) {
-            case Var v -> {
-                var u = env.lookup(v.name());
-                if (u == null) throw new RuntimeException("undefined: " + v.name());
-                else yield mgu(u.newInstance(), t, s);
-            }
-            case Lambda l -> {
-                var a = TypeVariable();
-                var b = TypeVariable();
-                var s1 = mgu(t, Arrow(a, b), s);
-                var env1 = env.append(l.v(), TypeScheme(List.of(), a));
-                yield tp(env1, l.body(), b, s1);
-            }
-            case Apply app -> {
-                var a = TypeVariable();
-                var s1 = tp(env, app.fn(), Arrow(a, t), s);
-                yield tp(env, app.arg(), a, s1);
-            }
-            case Let l -> {
-                var a = TypeVariable();
-                var s1 = tp(env, l.defn(), Arrow(a, t), s);
-                yield tp(env.append(l.v(), env.apply(s1).gen(s1.apply(a))), l.body(), t, s1);
-            }
-            case LetRec l -> {
-                var a = TypeVariable();
-                var b = TypeVariable();
-                var s1 = tp(env.append(l.v(), TypeScheme(List.of(), a)), l.defn(), b, s);
-                var s2 = mgu(a, b, s1);
-                Env ee = env.append(l.v(), env.apply(s2).gen(s2.apply(a)));
-                yield tp(ee, l.body(), t, s2);
-            }
-        };
     }
 
 }
@@ -231,6 +233,10 @@ interface Predef {
 
     static String showType(Term e) {
         return env.typeOf(e).toString();
+    }
+
+    public static void main(String[] args) {
+        System.out.println(showType(Lambda("x", Apply(Apply(Var("cons"), Var("x")), Var("nil")))));
     }
 
 }
