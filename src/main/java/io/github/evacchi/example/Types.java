@@ -1,13 +1,21 @@
 package io.github.evacchi.example;
 
 
+import io.github.evacchi.example.Term.*;
+import io.github.evacchi.example.Type.*;
+
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
+import static java.util.Map.entry;
 import static java.util.stream.Collectors.joining;
+import static io.github.evacchi.example.Type.*;
+
 
 sealed interface Term {
     record Lambda(String v, Term body) implements Term { public String toString() { return String.format("(λ%s.%s)", v, body); } }
@@ -58,9 +66,6 @@ sealed interface Type {
                 case TypeCons tc -> TypeCons(tc.name(), tc.types().stream().map(this::apply).toList());
             };
         }
-        Env apply(Env env) {
-
-        }
         Subst extend(TypeVariable x, Type t) {
             return new Subst() {
                 @Override
@@ -71,23 +76,50 @@ sealed interface Type {
         }
     }
 
-    record TypeScheme(List<TypeVariable> typeVars, Type t) {
+    record TypeScheme(List<TypeVariable> typeVars, Type type) {
         public Type newInstance() {
             var subst = Subst.Empty;
             for (TypeVariable tv : typeVars) {
                 subst = subst.extend(tv, TypeVariable());
             }
-            return subst.apply(t);
+            return subst.apply(type);
         }
     }
     static TypeScheme TypeScheme(List<TypeVariable> typeVars, Type t) { return new TypeScheme(typeVars, t); }
 
     final class Env {
         private Map<String, TypeScheme> env;
+        public Env() {
+            this(new HashMap<>());
+        }
+        public Env(Map<String, TypeScheme> env) {
+            this.env = env;
+        }
         TypeScheme lookup(String name) { return env.get(name); }
         TypeScheme gen(Type t) {
-            TypeScheme()
+            var res = tyVars(t);
+            res.removeAll(tyVars(this));
+            return TypeScheme(res, t);
         }
+        Env apply(Subst subst) {
+            var newEnv = new HashMap<String, TypeScheme>();
+            for (var kv : env.entrySet()) {
+                newEnv.put(kv.getKey(), TypeScheme(kv.getValue().typeVars(), subst.apply(kv.getValue().type())));
+            }
+            return new Env(newEnv);
+        }
+
+        public Env append(String k, TypeScheme ts) {
+            var e = new Env(new HashMap<>(env));
+            e.env.put(k, ts);
+            return e;
+        }
+
+        Type typeOf(Term e) {
+            var a = TypeVariable();
+            return tp(this, e, a, Subst.Empty).apply(a);
+        }
+
     }
 
     static List<TypeVariable> tyVars(Type t) {
@@ -97,5 +129,109 @@ sealed interface Type {
             case TypeCons tc -> tc.types().stream().flatMap(tp -> tyVars(tp).stream()).collect(Collectors.toList());
         };
     }
+
+    static List<TypeVariable> tyVars(TypeScheme ts) {
+        var tv = tyVars(ts.type());
+        tv.removeAll(ts.typeVars());
+        return tv;
+    }
+
+    static List<TypeVariable> tyVars(Env env) {
+        var res = new ArrayList<TypeVariable>();
+        for (var kv : env.env.entrySet()) {
+            res.addAll(tyVars(kv.getValue()));
+        }
+        return res;
+    }
+
+    static Subst mgu(Type t, Type u, Subst s) {
+        Type st = s.apply(t);
+        Type su = s.apply(u);
+        if (st instanceof TypeVariable a && su instanceof TypeVariable b && a.equals(b)) {
+            return s;
+        }
+        if (st instanceof TypeVariable a && !(tyVars(su).contains(st))) {
+            return s.extend(a, su);
+        }
+        if (su instanceof TypeVariable) {
+            return mgu(u, t, s);
+        }
+        if (st instanceof Arrow a && su instanceof Arrow b) {
+            mgu(a.t1(), b.t1(), mgu(a.t2(), b.t2(), s));
+        }
+        if (st instanceof TypeCons a && su instanceof TypeCons b && a.name().equals(b.name())) {
+            for (int i = 0; i < a.types().size(); i++) {
+                 s = mgu(a.types().get(i), b.types().get(i), s);
+            }
+            return s;
+        }
+        throw new RuntimeException("cannot unify " + st + " with " + su);
+    }
+
+    static Subst tp(Env env, Term e, Type t, Subst s) {
+        var current = e;
+        return switch (e) {
+            case Var v -> {
+                var u = env.lookup(v.name());
+                if (u == null) throw new RuntimeException("undefined: " + v.name());
+                else yield mgu(u.newInstance(), t, s);
+            }
+            case Lambda l -> {
+                var a = TypeVariable();
+                var b = TypeVariable();
+                var s1 = mgu(t, Arrow(a, b), s);
+                var env1 = env.append(l.v(), TypeScheme(List.of(), a));
+                yield tp(env1, l.body(), b, s1);
+            }
+            case Apply app -> {
+                var a = TypeVariable();
+                var s1 = tp(env, app.fn(), Arrow(a, t), s);
+                yield tp(env, app.arg(), a, s1);
+            }
+            case Let l -> {
+                var a = TypeVariable();
+                var s1 = tp(env, l.defn(), Arrow(a, t), s);
+                yield tp(env.append(l.v(), env.apply(s1).gen(s1.apply(a))), l.body(), t, s1);
+            }
+            case LetRec l -> {
+                var a = TypeVariable();
+                var b = TypeVariable();
+                var s1 = tp(env.append(l.v(), TypeScheme(List.of(), a)), l.defn(), b, s);
+                var s2 = mgu(a, b, s1);
+                Env ee = env.append(l.v(), env.apply(s2).gen(s2.apply(a)));
+                yield tp(ee, l.body(), t, s2);
+            }
+        };
+    }
+
+}
+
+interface Predef {
+    TypeCons booleanType = TypeCons("Boolean", List.of());
+    TypeCons intType = TypeCons("Int", List.of());
+    static TypeCons listType(Type t) { return TypeCons("List", List.of(t)); }
+    static TypeScheme gen(Type t){
+        return new Env().gen(t);
+    }
+
+    TypeVariable a = TypeVariable();
+    Env env = new Env(Map.ofEntries(
+        entry("true", gen(booleanType)),
+        entry("false", gen(booleanType)),
+        entry("if", gen(Arrow(booleanType, Arrow(a, Arrow(a, a))))),
+        entry("zero", gen(intType)),
+        entry("succ", gen(Arrow(intType, intType))),
+        entry("nil", gen(listType(a))),
+        entry("cons", gen(Arrow(a, Arrow(listType(a), listType(a))))),
+        entry("isEmpty", gen(Arrow(listType(a), booleanType))),
+        entry("head", gen(Arrow(listType(a), a))),
+        entry("tail", gen(Arrow(listType(a), listType(a)))),
+        entry("fix", gen(Arrow(Arrow(a, a), a)))
+    ));
+
+    static String showType(Term e) {
+        return env.typeOf(e).toString();
+    }
+
 }
 
