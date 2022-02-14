@@ -5,10 +5,13 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 import static io.github.evacchi.Term.*;
 import static io.github.evacchi.Type.*;
+import static java.util.stream.Collectors.*;
 
 sealed interface Type {
 
@@ -29,9 +32,45 @@ sealed interface Type {
     }
     static TypeVariable TypeVariable() { return new TypeVariable(); }
 
-    record TypeOperator(String name, List<Type> types) implements Type {}
+    sealed class TypeOperator implements Type {
+        final String name; final List<Type> types;
+        public TypeOperator(String name, List<Type> types) {
+            this.name = name; this.types = types;
+        }
+        public String name() { return name; }
+        public List<Type> types() { return types; }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) return true;
+            if (o == null || getClass() != o.getClass()) return false;
+            TypeOperator that = (TypeOperator) o;
+            return Objects.equals(name, that.name) && Objects.equals(types, that.types);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(name, types);
+        }
+
+        @Override
+        public String toString() {
+            return name + (types.isEmpty() ? "" : types.stream().map(Objects::toString).collect(joining(",", "<", ">")));
+        }
+    }
+    final class Function extends TypeOperator {
+        public Function(Type fromType, Type toType) {
+            super("->", List.of(fromType, toType));
+        }
+
+        @Override
+        public String toString() {
+            return types.get(0) + " -> " + types.get(1);
+        }
+    }
+
     static TypeOperator TypeOperator(String name, List<Type> types) { return new TypeOperator(name, types); }
-    static TypeOperator Function(Type fromType, Type toType) { return TypeOperator("->", List.of(fromType, toType)); }
+    static TypeOperator Function(Type fromType, Type toType) { return new Function(fromType, toType); }
 
     TypeOperator INTEGER = TypeOperator("int", List.of());
     TypeOperator BOOLEAN = TypeOperator("bool", List.of());
@@ -87,7 +126,7 @@ public interface TypeSystem {
         var a = prune(t1);
         var b = prune(t2);
         if (a instanceof TypeVariable tv) {
-            if (a != b) {
+            if (!a.equals(b)) {
                 if (occursInType(a, b))
                     throw new RuntimeException("recursive unification");
                 else

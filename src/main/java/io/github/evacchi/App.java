@@ -55,9 +55,11 @@ interface App {
                 LetRec("factorial",   // fun factorial(n) = if zero(n) 1 else n * factorial(n-1): int
                         Lambda("n",
                                 Apply(Apply(Apply(Id("if"),
-                                                        Apply(Id("zero"),Id("n"))),
+                                                        Apply(Id("zero"), Id("n"))),
                                                 Id("1")),
-                                        Apply(Apply(Id("times"),Id("n")),Apply(Id("prev"),Id("n"))))),
+//                                        Apply(Apply(Id("times"),Id("n")),Apply(Id("prev"),Id("n"))))),
+                                        Apply(Apply(Id("times"),
+                                                Apply(Id("factorial"), Id("n"))), Apply(Id("prev"), Id("n"))))),
                         Apply(Id("factorial"), Id("5")))
         ).forEach(it -> {
             System.out.println(prune(analyse(it, env, Set.of())));
