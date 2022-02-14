@@ -1,21 +1,28 @@
 package io.github.evacchi.example;
 
 
-import io.github.evacchi.example.Term.*;
-import io.github.evacchi.example.Type.*;
-
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
+import static io.github.evacchi.example.Term.Apply;
+import static io.github.evacchi.example.Term.Lambda;
+import static io.github.evacchi.example.Term.Let;
+import static io.github.evacchi.example.Term.LetRec;
+import static io.github.evacchi.example.Term.Var;
+import static io.github.evacchi.example.Type.Arrow;
+import static io.github.evacchi.example.Type.Env;
+import static io.github.evacchi.example.Type.TypeCons;
+import static io.github.evacchi.example.Type.TypeScheme;
+import static io.github.evacchi.example.Type.TypeVariable;
+import static io.github.evacchi.example.Type.TypedEnv;
+import static io.github.evacchi.example.Type.mgu;
 import static java.util.Map.entry;
 import static java.util.stream.Collectors.joining;
-import static io.github.evacchi.example.Type.*;
-import static io.github.evacchi.example.Term.*;
+import static java.util.stream.Collectors.toList;
 
 
 sealed interface Term {
@@ -36,9 +43,12 @@ sealed interface Term {
 }
 
 sealed interface Type {
+    List<TypeVariable> freeVars();
     final class TypeVariable implements Type {
         private static int next = 0;
         String v; TypeVariable(String v) { this.v =v ; }
+        public List<TypeVariable> freeVars() { return new ArrayList<>(List.of(this)); }
+
         public String toString() { return v; }
         public boolean equals(Object o) { return o instanceof TypeVariable tv && Objects.equals(v, tv.v); }
         public int hashCode() { return Objects.hash(v); }
@@ -46,12 +56,16 @@ sealed interface Type {
     static TypeVariable TypeVariable(String v) {return new TypeVariable(v);}
     static TypeVariable TypeVariable() { return new TypeVariable("a" + TypeVariable.next++); }
 
-    record Arrow(Type t1, Type t2) implements Type { public String toString() { return String.format("(%s->%s)", t1, t2); }}
-    static Arrow Arrow(Type t1, Type t2) {return new Arrow(t1,t2);}
+    record Arrow(Type from, Type to) implements Type {
+        public List<TypeVariable> freeVars() { return Stream.concat(from.freeVars().stream(), to.freeVars().stream()).collect(toList()); }
+        public String toString() { return String.format("(%s->%s)", from, to); }}
+    static Arrow Arrow(Type t1, Type t2) { return new Arrow(t1,t2); }
 
     record TypeCons(String name, List<Type> types) implements Type {
         public String toString() {
-            return name + (types.isEmpty() ? "" : types.stream().map(Objects::toString).collect(joining(",", "<", ">"))); }}
+            return name + (types.isEmpty() ? "" : types.stream().map(Objects::toString).collect(joining(",", "<", ">"))); }
+        public List<TypeVariable> freeVars() { return types.stream().flatMap(tp -> tp.freeVars().stream()).collect(toList()); }
+    }
     static TypeCons TypeCons(String name, List<Type> types) { return new TypeCons(name, types); }
 
     abstract class Subst {
@@ -63,27 +77,31 @@ sealed interface Type {
                     var u = lookup(tv);
                     yield (t.equals(u)) ? t : apply(u);
                 }
-                case Arrow a -> Arrow(apply(a.t1()), apply(a.t2()));
+                case Arrow a -> Arrow(apply(a.from()), apply(a.to()));
                 case TypeCons tc -> TypeCons(tc.name(), tc.types().stream().map(this::apply).toList());
             };
         }
         Subst extend(TypeVariable x, Type t) {
             return new Subst() {
-                @Override
-                Type lookup(TypeVariable y) {
-                    return (x.equals(y))? t : Subst.this.lookup(y);
-                }
+                @Override Type lookup(TypeVariable y) { return (x.equals(y))? t : Subst.this.lookup(y); }
             };
         }
     }
 
     record TypeScheme(List<TypeVariable> typeVars, Type type) {
+        // returns the type of the scheme after all universally quantified
+        // type vars have been renamed to fresh vars
         public Type newInstance() {
             var subst = Subst.Empty;
             for (TypeVariable tv : typeVars) {
                 subst = subst.extend(tv, TypeVariable());
             }
             return subst.apply(type);
+        }
+        public List<TypeVariable> freeVars() {
+            var tv = this.type().freeVars();
+            tv.removeAll(this.typeVars());
+            return tv;
         }
     }
     static TypeScheme TypeScheme(List<TypeVariable> typeVars, Type t) { return new TypeScheme(typeVars, t); }
@@ -97,23 +115,40 @@ sealed interface Type {
             this.env = env;
         }
         TypeScheme lookup(String name) { return env.get(name); }
-        TypeScheme gen(Type t) {
-            var res = tyVars(t);
-            res.removeAll(tyVars(this));
+        TypeScheme toTypeScheme(Type t) {
+            var res = t.freeVars();
+            res.removeAll(this.freeVars());
             return TypeScheme(res, t);
         }
         Env apply(Subst subst) {
             var newEnv = new HashMap<String, TypeScheme>();
             for (var kv : env.entrySet()) {
-                newEnv.put(kv.getKey(), TypeScheme(kv.getValue().typeVars(), subst.apply(kv.getValue().type())));
+                var ts = kv.getValue();
+                var name = kv.getKey();
+                Type substApplied = subst.apply(ts.type());
+                newEnv.put(name, TypeScheme(ts.typeVars(), substApplied));
             }
             return new Env(newEnv);
         }
 
-        public Env append(String k, TypeScheme ts) {
+        Env append(String k, TypeScheme ts) {
             var e = new Env(new HashMap<>(env));
             e.env.put(k, ts);
             return e;
+        }
+
+        List<TypeVariable> freeVars() {
+            return env.values().stream()
+                    .flatMap(ts -> ts.freeVars().stream())
+                    .collect(toList());
+        }
+    }
+
+    class TypedEnv {
+        Env env;
+
+        public TypedEnv(Env env) {
+            this.env = env;
         }
 
         Type typeOf(Term e) {
@@ -121,13 +156,10 @@ sealed interface Type {
             return tp(e, a, Subst.Empty).apply(a);
         }
 
-        Term current ;
-
         Subst tp(Term e, Type t, Subst s) {
-            current = e;
             return switch (e) {
                 case Var v -> {
-                    var u = this.lookup(v.name());
+                    var u = env.lookup(v.name());
                     if (u == null) throw new RuntimeException("undefined: " + v.name());
                     else yield mgu(u.newInstance(), t, s);
                 }
@@ -135,8 +167,8 @@ sealed interface Type {
                     var a = TypeVariable();
                     var b = TypeVariable();
                     var s1 = mgu(t, Arrow(a, b), s);
-                    var env1 = this.append(l.v(), TypeScheme(List.of(), a));
-                    yield env1.tp(l.body(), b, s1);
+                    var env1 = env.append(l.v(), TypeScheme(List.of(), a));
+                    yield new TypedEnv(env1).tp(l.body(), b, s1);
                 }
                 case Apply app -> {
                     var a = TypeVariable();
@@ -146,56 +178,37 @@ sealed interface Type {
                 case Let l -> {
                     var a = TypeVariable();
                     var s1 = this.tp(l.defn(), Arrow(a, t), s);
-                    yield this.append(l.v(), this.apply(s1).gen(s1.apply(a))).tp(l.body(), t, s1);
+                    yield new TypedEnv( env.append(l.v(), env.apply(s1).toTypeScheme(s1.apply(a))) ).tp(l.body(), t, s1);
                 }
                 case LetRec l -> {
                     var a = TypeVariable();
                     var b = TypeVariable();
-                    var s1 = this.append(l.v(), TypeScheme(List.of(), a)).tp(l.defn(), b, s);
+                    var s1 = new TypedEnv( env.append(l.v(), TypeScheme(List.of(), a)) ).tp(l.defn(), b, s);
                     var s2 = mgu(a, b, s1);
-                    Env ee = this.append(l.v(), this.apply(s2).gen(s2.apply(a)));
-                    yield ee.tp(l.body(), t, s2);
+                    var tenv = new TypedEnv(env.append(l.v(), env.apply(s2).toTypeScheme(s2.apply(a))));
+                    yield tenv.tp(l.body(), t, s2);
                 }
             };
         }
     }
 
-    static List<TypeVariable> tyVars(Type t) {
-        return switch (t) {
-            case TypeVariable tv -> new ArrayList<>(List.of(tv));
-            case Arrow a -> Stream.concat(tyVars(a.t1()).stream(), tyVars(a.t2()).stream()).collect(Collectors.toList());
-            case TypeCons tc -> tc.types().stream().flatMap(tp -> tyVars(tp).stream()).collect(Collectors.toList());
-        };
-    }
-
-    static List<TypeVariable> tyVars(TypeScheme ts) {
-        var tv = tyVars(ts.type());
-        tv.removeAll(ts.typeVars());
-        return tv;
-    }
-
-    static List<TypeVariable> tyVars(Env env) {
-        var res = new ArrayList<TypeVariable>();
-        for (var kv : env.env.entrySet()) {
-            res.addAll(tyVars(kv.getValue()));
-        }
-        return res;
-    }
-
+    /**
+     * most general unifier
+     */
     static Subst mgu(Type t, Type u, Subst s) {
         Type st = s.apply(t);
         Type su = s.apply(u);
         if (st instanceof TypeVariable a && su instanceof TypeVariable b && a.equals(b)) {
             return s;
         }
-        if (st instanceof TypeVariable a && !(tyVars(su).contains(st))) {
+        if (st instanceof TypeVariable a && !(su.freeVars().contains(st))) {
             return s.extend(a, su);
         }
-        if (su instanceof TypeVariable) {
+        if (/*    st instanceof any   */      su instanceof TypeVariable) {
             return mgu(u, t, s);
         }
         if (st instanceof Arrow a && su instanceof Arrow b) {
-            return mgu(a.t1(), b.t1(), mgu(a.t2(), b.t2(), s));
+            return mgu(a.from(), b.from(), mgu(a.to(), b.to(), s));
         }
         if (st instanceof TypeCons a && su instanceof TypeCons b && a.name().equals(b.name())) {
             for (int i = 0; i < a.types().size(); i++) {
@@ -212,9 +225,7 @@ interface Predef {
     TypeCons booleanType = TypeCons("Boolean", List.of());
     TypeCons intType = TypeCons("Int", List.of());
     static TypeCons listType(Type t) { return TypeCons("List", List.of(t)); }
-    static TypeScheme gen(Type t){
-        return new Env().gen(t);
-    }
+    static TypeScheme gen(Type t) { return TypeScheme(t.freeVars(), t); } // /*new Env().toTypeScheme(t)*/ }
 
     TypeVariable a = TypeVariable();
     Env env = new Env(Map.ofEntries(
@@ -232,7 +243,7 @@ interface Predef {
     ));
 
     static String showType(Term e) {
-        return env.typeOf(e).toString();
+        return new TypedEnv(env).typeOf(e).toString();
     }
 
     public static void main(String[] args) {
