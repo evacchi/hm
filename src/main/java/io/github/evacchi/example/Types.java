@@ -1,7 +1,6 @@
 package io.github.evacchi.example;
 
 
-import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -21,9 +20,8 @@ import static io.github.evacchi.example.Type.TypeVar;
 import static io.github.evacchi.example.Type.TypedEnv;
 import static io.github.evacchi.example.Type.mgu;
 import static java.util.Map.entry;
+import static java.util.function.Predicate.not;
 import static java.util.stream.Collectors.joining;
-import static java.util.stream.Collectors.reducing;
-import static java.util.stream.Collectors.toList;
 
 
 sealed interface Term {
@@ -48,7 +46,7 @@ sealed interface Type {
     final class TypeVar implements Type {
         private static int next = 0;
         String v; TypeVar(String v) { this.v =v ; }
-        public List<TypeVar> freeVars() { return new ArrayList<>(List.of(this)); }
+        public List<TypeVar> freeVars() { return List.of(this); }
 
         public String toString() { return v; }
         public boolean equals(Object o) { return o instanceof TypeVar tv && Objects.equals(v, tv.v); }
@@ -58,14 +56,14 @@ sealed interface Type {
     static TypeVar TypeVar() { return new TypeVar("a" + TypeVar.next++); }
 
     record Arrow(Type from, Type to) implements Type {
-        public List<TypeVar> freeVars() { return Stream.concat(from.freeVars().stream(), to.freeVars().stream()).distinct().collect(toList()); }
+        public List<TypeVar> freeVars() { return Stream.concat(from.freeVars().stream(), to.freeVars().stream()).distinct().toList(); }
         public String toString() { return String.format("(%s->%s)", from, to); }}
     static Arrow Arrow(Type t1, Type t2) { return new Arrow(t1,t2); }
 
     record TypeCons(String name, List<Type> types) implements Type {
         public String toString() {
             return name + (types.isEmpty() ? "" : types.stream().map(Objects::toString).collect(joining(",", "<", ">"))); }
-        public List<TypeVar> freeVars() { return types.stream().flatMap(tp -> tp.freeVars().stream()).collect(toList()); }
+        public List<TypeVar> freeVars() { return types.stream().flatMap(tp -> tp.freeVars().stream()).toList(); }
     }
     static TypeCons TypeCons(String name, List<Type> types) { return new TypeCons(name, types); }
 
@@ -74,10 +72,11 @@ sealed interface Type {
      * It maps a finite number of type variables to some types, and leaves all other type variables unchanged.
      * The meaning of a substitution is extended point-wise to a mapping from types to types ({@link #apply(Type)})
      */
-    abstract class Subst {
-        static Subst Empty = new Subst() { Type lookup(TypeVar tv) { return tv; } };
-        abstract Type lookup(TypeVar tv);
-        Type apply(Type t) {
+    interface Subst {
+        static Subst Empty = tv -> tv;
+        Type lookup(TypeVar tv);
+
+        default Type apply(Type t) {
             return switch(t) {
                 case TypeVar tv -> {
                     var u = lookup(tv);
@@ -87,10 +86,8 @@ sealed interface Type {
                 case TypeCons tc -> TypeCons(tc.name(), tc.types().stream().map(this::apply).toList());
             };
         }
-        Subst extend(TypeVar x, Type t) {
-            return new Subst() {
-                @Override Type lookup(TypeVar y) { return (x.equals(y))? t : Subst.this.lookup(y); }
-            };
+        default Subst extend(TypeVar x, Type t) {
+            return y -> x.equals(y)? t : Subst.this.lookup(y);
         }
     }
 
@@ -112,9 +109,8 @@ sealed interface Type {
             return subst.apply(type);
         }
         public List<TypeVar> freeVars() {
-            var tv = this.type().freeVars();
-            tv.removeAll(this.typeVars());
-            return tv;
+            // this.type.freeVars() - this.typeVars
+            return this.type.freeVars().stream().filter(not(this.typeVars::contains)).toList();
         }
     }
     static TypeScheme TypeScheme(List<TypeVar> typeVars, Type t) { return new TypeScheme(typeVars, t); }
@@ -128,9 +124,9 @@ sealed interface Type {
         // The gen function turns a given type into a type scheme, quantifying over all type
         // variables that are free in the type, but not in the environment.
         TypeScheme toTypeScheme(Type t) {
-            var res = t.freeVars();
-            res.removeAll(this.freeVars());
-            return TypeScheme(res, t);
+            // t.freeVars() - this.freeVars()
+            List<TypeVar> envFreeVars = this.freeVars();
+            return TypeScheme(t.freeVars().stream().filter(not(envFreeVars::contains)).toList(), t);
         }
         Env apply(Subst subst) {
             var newEnv = new HashMap<String, TypeScheme>();
@@ -153,7 +149,7 @@ sealed interface Type {
             return env.values().stream()
                     .flatMap(ts -> ts.freeVars().stream())
                     .distinct()
-                    .collect(toList());
+                    .toList();
         }
     }
 
